@@ -18,11 +18,11 @@ The extracted folder came from:
 
 - `/mnt/z/Documents/My Games/PeerPlugin1/substance-painter-mcp-and-skill-full-with-edits-2026-04-05.zip`
 
-That archive included a note that the MCP repo had uncommitted edits when it was bundled. The original note is preserved in [BUNDLE_NOTES.txt](/mnt/z/Documents/My Games/PeerPlugin1/substance-painter-share-bundle-full/BUNDLE_NOTES.txt).
+That archive included a note that the MCP repo had uncommitted edits when it was bundled. The original note is preserved in [BUNDLE_NOTES.txt](/mnt/z/Documents/My Games/PeerPlugin1/Substance-Paint-MCP/BUNDLE_NOTES.txt).
 
 ## Install The Painter Side
 
-Copy [painter_plugin.py](/mnt/z/Documents/My Games/PeerPlugin1/substance-painter-share-bundle-full/substance-painter-mcp/painter_plugin.py) into the Substance Painter plugins folder:
+Copy [painter_plugin.py](/mnt/z/Documents/My Games/PeerPlugin1/Substance-Paint-MCP/substance-painter-mcp/painter_plugin.py) into the Substance Painter plugins folder:
 
 - Windows: `%USERPROFILE%\Documents\Adobe\Adobe Substance 3D Painter\python\plugins\`
 - macOS: `~/Documents/Adobe/Adobe Substance 3D Painter/python/plugins/`
@@ -51,7 +51,7 @@ Your MCP client should launch:
 The main runtime path in this extracted bundle is:
 
 ```text
-/mnt/z/Documents/My Games/PeerPlugin1/substance-painter-share-bundle-full/substance-painter-mcp/server.py
+/mnt/z/Documents/My Games/PeerPlugin1/Substance-Paint-MCP/substance-painter-mcp/server.py
 ```
 
 ## Client Wiring
@@ -77,8 +77,8 @@ The server then talks to Painter on local port `9877`.
 
 The bundle also includes a reusable Codex skill:
 
-- [SKILL.md](/mnt/z/Documents/My Games/PeerPlugin1/substance-painter-share-bundle-full/substance-painter-mcp-master/SKILL.md)
-- [openai.yaml](/mnt/z/Documents/My Games/PeerPlugin1/substance-painter-share-bundle-full/substance-painter-mcp-master/agents/openai.yaml)
+- [SKILL.md](/mnt/z/Documents/My Games/PeerPlugin1/Substance-Paint-MCP/substance-painter-mcp-master/SKILL.md)
+- [openai.yaml](/mnt/z/Documents/My Games/PeerPlugin1/Substance-Paint-MCP/substance-painter-mcp-master/agents/openai.yaml)
 
 To reuse it in another Codex environment, copy `substance-painter-mcp-master/` into that environment's skills directory.
 
@@ -98,7 +98,7 @@ This extracted folder was set up as a new clean git repository at the bundle roo
 If you want this published, add a remote and push this folder as its own repository:
 
 ```bash
-cd /mnt/z/Documents/My Games/PeerPlugin1/substance-painter-share-bundle-full
+cd /mnt/z/Documents/My Games/PeerPlugin1/Substance-Paint-MCP
 git remote add origin <your-repo-url>
 git add .
 git commit -m "Import Substance Painter MCP bundle and skill"
