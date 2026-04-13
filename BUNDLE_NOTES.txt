@@ -1,0 +1,15 @@
+Bundle contents:
+- substance-painter-mcp (includes .git and current working tree edits)
+- substance-painter-mcp-master skill
+
+Excluded:
+- .venv
+- __pycache__
+- *.pyc
+
+Git status for substance-painter-mcp:
+M README.md
+ M painter_plugin.py
+ M server.py
+?? .venv/
+?? smoke_test.py

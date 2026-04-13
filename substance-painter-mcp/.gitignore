@@ -1,0 +1,39 @@
+# Substance Painter project files (binary, often large)
+*.spp
+*.painter_lock
+*.sppkg
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Local MCP config — contains machine-specific absolute paths
+# Copy from .mcp.json.example and edit for your machine
+.mcp.json
+
+# Claude Code session data
+.claude/
+.claude-flow/
+CLAUDE.md
+
+# Copilot test artifacts
+.copilot-test/
+.github/
+
+# Environment / secrets
+.env
+.env.*
+*.env
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

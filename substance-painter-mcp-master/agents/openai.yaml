@@ -1,0 +1,7 @@
+interface:
+  display_name: "Substance Painter MCP Master"
+  short_description: "Painter MCP workflow, PBR, exports, and debug flow"
+  default_prompt: "Use $substance-painter-mcp-master to inspect the live Substance Painter project, rebuild or repair the PBR stack, capture directional screenshots, and drive the Blender-to-Painter-export workflow correctly."
+
+policy:
+  allow_implicit_invocation: true
