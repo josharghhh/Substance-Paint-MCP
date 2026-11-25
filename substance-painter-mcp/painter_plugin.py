@@ -714,77 +714,34 @@ def handle_reload_mesh(params):
         preserve_strokes=bool(params.get("preserve_strokes", True)),
     )
 
-    completed = threading.Event()
-    status_info = {
-        "raw": None,
-        "name": "UNKNOWN",
-        "value": None,
-        "success": None,
-    }
-
-    success_value = int(getattr(status_enum, "SUCCESS", 0))
-    error_value = int(getattr(status_enum, "ERROR", 2))
+    # The handler runs on Painter's main thread and the reload callback fires on that same thread
+    # later, so waiting here would deadlock. Start it, return, poll reload_mesh_status.
+    # ReloadMeshStatus is an enum (not int-convertible): compare by name.
+    _RELOAD_STATE.update(status="RUNNING", mesh_file_path=mesh_file_path, started=time.time(), ended=None)
 
     def loading_status_cb(status):
-        try:
-            status_value = getattr(status, "value", None)
-            if status_value is None:
-                try:
-                    status_value = int(status)
-                except Exception:
-                    status_value = None
-
-            status_name = getattr(status, "name", None)
-            if status_name is None and status_value is not None:
-                if status_value == success_value:
-                    status_name = "SUCCESS"
-                elif status_value == error_value:
-                    status_name = "ERROR"
-            if status_name is None:
-                status_name = str(status)
-
-            status_info["raw"] = str(status)
-            status_info["name"] = status_name
-            status_info["value"] = status_value
-            if status_value is not None:
-                status_info["success"] = status_value == success_value
-            else:
-                status_info["success"] = bool(status == getattr(status_enum, "SUCCESS", None))
-        finally:
-            completed.set()
+        _RELOAD_STATE["status"] = getattr(status, "name", None) or str(status)
+        _RELOAD_STATE["ended"] = time.time()
 
     try:
         sp_project.reload_mesh(mesh_file_path, settings, loading_status_cb)
     except Exception as e:
+        _RELOAD_STATE["status"] = "ERROR"
         return {"error": str(e)}
-
-    if not completed.wait(REQUEST_EXECUTION_TIMEOUT):
-        return {
-            "success": True,
-            "status": "PENDING",
-            "message": "Mesh reload started; Painter did not report completion before the timeout.",
-            "mesh_file_path": mesh_file_path,
-        }
-
-    if status_info["success"]:
-        return {
-            "success": True,
-            "status": status_info["name"],
-            "status_value": status_info["value"],
-            "mesh_file_path": mesh_file_path,
-            "import_cameras": bool(params.get("import_cameras", True)),
-            "preserve_strokes": bool(params.get("preserve_strokes", True)),
-        }
-
     return {
-        "error": (
-            f"Mesh reload failed with status '{status_info['name']}'. "
-            "Check the Painter log for details."
-        ),
-        "status": status_info["name"],
-        "status_value": status_info["value"],
+        "success": True,
+        "status": "STARTED",
+        "message": "Mesh reload started; poll reload_mesh_status (SUCCESS / ERROR).",
         "mesh_file_path": mesh_file_path,
+        "preserve_strokes": bool(params.get("preserve_strokes", True)),
     }
+
+
+_RELOAD_STATE = {"status": None, "mesh_file_path": None, "started": None, "ended": None}
+
+
+def handle_reload_mesh_status(params):
+    return dict(_RELOAD_STATE)
 
 
 # ---------------------------------------------------------------------------
@@ -2553,6 +2510,181 @@ HANDLERS = {
 
 
 # ---------------------------------------------------------------------------
+# Native Python baking (substance_painter.baking, Painter 8.3+)
+# bake_info  -> property names/values/enum options (common + bakers) for a texture set
+# bake_start -> set size / enabled bakers / any property, then bake async (returns at once)
+# bake_status-> running flag + last BakingProcessEnded status
+# ---------------------------------------------------------------------------
+try:
+    import substance_painter.baking as sp_baking
+    import substance_painter.event as sp_event
+except Exception:
+    sp_baking = None
+    sp_event = None
+
+_BAKE_STATE = {"running": False, "last_status": None, "started": None, "ended": None, "texture_sets": []}
+_BAKE_HOOKED = [False]
+
+
+def _bake_hook():
+    if _BAKE_HOOKED[0] or sp_event is None:
+        return
+
+    def _ended(ev):
+        _BAKE_STATE["running"] = False
+        _BAKE_STATE["ended"] = time.time()
+        _BAKE_STATE["last_status"] = str(getattr(ev, "status", ev))
+
+    # connect() keeps only a weakref: a nested callback is collected at once and never fires
+    sp_event.DISPATCHER.connect_strong(sp_event.BakingProcessEnded, _ended)
+    _BAKE_HOOKED[0] = True
+
+
+def _jsonable(v):
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    return str(v)
+
+
+def _usages():
+    # pybind11 enums are not iterable: read the members table
+    return list(sp_baking.MeshMapUsage.__members__.values())
+
+
+def _usage(name):
+    key = str(name).replace("_", "").replace(" ", "").lower()
+    alias = {"ao": "ambientocclusion", "ambientocclusion": "ao", "wsn": "worldspacenormal",
+             "worldspacenormals": "worldspacenormal", "normals": "normal"}
+    keys = {key, alias.get(key, key)}
+    for u in _usages():
+        if u.name.replace("_", "").lower() in keys:
+            return u
+    raise ValueError(f"Unknown baker '{name}'. Options: {[u.name for u in _usages()]}")
+
+
+def _prop_info(p):
+    d = {"value": _jsonable(p.value())}
+    try:
+        ev = p.enum_values()
+        if ev:
+            d["enum"] = {str(k): _jsonable(v) for k, v in ev.items()}
+    except Exception:
+        pass
+    return d
+
+
+def _prop_value(p, v):
+    if isinstance(v, str):
+        try:
+            ev = p.enum_values()
+        except Exception:
+            ev = None
+        if ev:
+            for k, val in ev.items():
+                if str(k).lower() == v.lower():
+                    return val
+            raise ValueError(f"'{v}' not in {sorted(str(k) for k in ev)}")
+    if isinstance(v, list):
+        return tuple(v)
+    return v
+
+
+def _bake_params(ts_name):
+    names = [ts.name() for ts in sp_textureset.all_texture_sets()]
+    ts_name = ts_name or names[0]
+    if ts_name not in names:
+        raise ValueError(f"Texture set '{ts_name}' not found. Available: {names}")
+    return ts_name, sp_baking.BakingParameters.from_texture_set_name(ts_name)
+
+
+def handle_bake_info(params):
+    if sp_baking is None:
+        return {"error": "substance_painter.baking is not available in this Painter version."}
+    if not sp_project.is_open():
+        return {"error": "No project is open."}
+    try:
+        ts_name, bp = _bake_params(params.get("texture_set"))
+        enabled = [u.name for u in bp.get_enabled_bakers()]
+        wanted = params.get("bakers") or enabled
+        return {
+            "texture_set": ts_name,
+            "enabled_bakers": enabled,
+            "all_bakers": [u.name for u in _usages()],
+            "common": {k: _prop_info(p) for k, p in bp.common().items()},
+            "bakers": {_usage(b).name: {k: _prop_info(p) for k, p in bp.baker(_usage(b)).items()} for b in wanted},
+        }
+    except Exception as e:
+        return {"error": str(e), "trace": traceback.format_exc()[-1500:]}
+
+
+def handle_bake_start(params):
+    """params: texture_sets [names] (default all), size (e.g. 4096), bakers [names],
+    set {"common": {prop: value}, "<Baker>": {prop: value}} (enum values by name)."""
+    if sp_baking is None:
+        return {"error": "substance_painter.baking is not available in this Painter version."}
+    if not sp_project.is_open():
+        return {"error": "No project is open."}
+    if _BAKE_STATE["running"] and not params.get("force"):
+        return {"error": "A bake is already running (pass force true if it is stale).", "state": dict(_BAKE_STATE)}
+    try:
+        all_ts = {ts.name(): ts for ts in sp_textureset.all_texture_sets()}
+        sets = params.get("texture_sets") or list(all_ts)
+        bad = [s for s in sets if s not in all_ts]
+        if bad:
+            return {"error": f"Unknown texture sets {bad}. Available: {sorted(all_ts)}"}
+        applied = {}
+        for s in sets:
+            _, bp = _bake_params(s)
+            if params.get("bakers"):
+                bp.set_enabled_bakers([_usage(b) for b in params["bakers"]])
+            values = {}
+            common = bp.common()
+            if params.get("size"):
+                n = int(params["size"]).bit_length() - 1
+                if "OutputSize" not in common:
+                    return {"error": f"No OutputSize in common props: {sorted(common)}"}
+                values[common["OutputSize"]] = (n, n)
+            for group, props in (params.get("set") or {}).items():
+                table = common if group.lower() == "common" else bp.baker(_usage(group))
+                for k, v in props.items():
+                    if k not in table:
+                        return {"error": f"'{k}' not in {group}: {sorted(table)}"}
+                    values[table[k]] = _prop_value(table[k], v)
+            if values:
+                sp_baking.BakingParameters.set(values)
+            applied[s] = len(values)
+        for name in all_ts:   # enabled flag lives on each texture set's own parameters
+            sp_baking.BakingParameters.from_texture_set_name(name).set_textureset_enabled(name in sets)
+        _bake_hook()
+        _BAKE_STATE.update(running=True, started=time.time(), ended=None, last_status=None, texture_sets=sets)
+        if hasattr(sp_baking, "bake_selected_textures_async"):
+            sp_baking.bake_selected_textures_async()
+        else:
+            sp_baking.bake_async(all_ts[sets[0]])
+        return {"success": True, "started": sets, "properties_set": applied}
+    except Exception as e:
+        _BAKE_STATE["running"] = False
+        return {"error": str(e), "trace": traceback.format_exc()[-1500:]}
+
+
+def handle_bake_status(params):
+    st = dict(_BAKE_STATE)
+    if st["started"]:
+        st["elapsed_s"] = round((st["ended"] or time.time()) - st["started"], 1)
+    return st
+
+
+HANDLERS.update({
+    "bake_info":   handle_bake_info,
+    "bake_start":  handle_bake_start,
+    "bake_status": handle_bake_status,
+    "reload_mesh_status": handle_reload_mesh_status,
+})
+
+
+# ---------------------------------------------------------------------------
 # TCP socket server (runs on a background thread)
 # ---------------------------------------------------------------------------
 
@@ -2757,21 +2889,184 @@ _server = PainterSocketServer()
 _file_queue_server = PainterFileQueueServer()
 
 
+# --- On/off toggle: dockable "MCP Bridge" panel, plugins-toolbar button, Window menu item.
+# State is remembered between Painter sessions (QSettings ARGH/PainterMCP "enabled").
+_UI = {"buttons": [], "actions": []}
+
+try:
+    from PySide6.QtGui import QAction as _QAction
+except ImportError:
+    _QAction = QtWidgets.QAction
+
+
+def _settings():
+    return QtCore.QSettings("ARGH", "PainterMCP")
+
+
+def _refresh_ui():
+    on = _server.running
+    for b in _UI["buttons"]:
+        b.blockSignals(True)
+        b.setChecked(on)
+        b.setText(f"MCP {'ON' if on else 'OFF'}  :{PORT}")
+        b.setToolTip("Click to turn the Claude/MCP bridge " + ("off" if on else "on"))
+        b.setStyleSheet("QPushButton{padding:3px 10px;font-weight:bold;border-radius:3px;"
+                        + ("background:#2e7d32;color:white;}" if on else "background:#555;color:#ddd;}"))
+        b.blockSignals(False)
+    for a in _UI["actions"]:
+        a.blockSignals(True)
+        a.setChecked(on)
+        a.setText(f"MCP bridge ({'on' if on else 'off'})")
+        a.blockSignals(False)
+
+
+def set_bridge_enabled(on):
+    on = bool(on)
+    if on:
+        try:
+            _server.start()
+        except Exception as e:
+            log_error(f"MCP socket could not start on port {PORT}: {e}")
+        _file_queue_server.start()
+    else:
+        _server.stop()
+        _file_queue_server.stop()
+    try:
+        _settings().setValue("enabled", on)
+    except Exception:
+        pass
+    log_info(f"MCP bridge {'enabled' if on else 'disabled'}.")
+    _refresh_ui()
+
+
+def reload_self():
+    """Re-import this plugin from disk (Python > Reload Plugins Folder does the same; un/re-ticking does not)."""
+    try:
+        import substance_painter_plugins as _spp
+        _spp.reload_plugin(sys.modules[__name__])
+    except Exception as e:
+        log_error(f"Plugin reload failed: {e}")
+
+
+def handle_reload_plugin(params):
+    # deferred so this response is sent before the module (and this socket server) is torn down
+    QtCore.QTimer.singleShot(300, reload_self)
+    return {"success": True, "message": "Plugin reload scheduled; reconnect in ~2 s."}
+
+
+HANDLERS["reload_plugin"] = handle_reload_plugin
+
+
+def handle_new_project(params):
+    """Create a standard (non-UV-tile) project from a mesh.
+    params: mesh_file_path, resolution (default 4096), normal_format DirectX|OpenGL (default DirectX),
+            workflow Default|UVTile|TextureSetPerUVTile (default Default),
+            backup_current_to: path to save a COPY of the open project first (never overwrites it),
+            discard_current: true to close an open project with unsaved changes without a backup."""
+    mesh = normalize_native_path(params.get("mesh_file_path", ""))
+    if not mesh or not os.path.isfile(mesh):
+        return {"error": f"mesh_file_path not found: '{mesh}'"}
+    backup = normalize_native_path(params.get("backup_current_to", "") or "")
+    if sp_project.is_open():
+        if backup:
+            if os.path.exists(backup):
+                return {"error": f"backup_current_to already exists: {backup}"}
+            sp_project.save_as_copy(backup)
+        elif sp_project.needs_saving() and not params.get("discard_current"):
+            return {"error": "Open project has unsaved changes: pass backup_current_to or discard_current."}
+        sp_project.close()
+    nf = getattr(sp_project.NormalMapFormat, params.get("normal_format", "DirectX"))
+    wf = getattr(sp_project.ProjectWorkflow, params.get("workflow", "Default"))
+    settings = sp_project.Settings(default_texture_resolution=int(params.get("resolution", 4096)),
+                                   normal_map_format=nf, project_workflow=wf, import_cameras=False)
+    sp_project.create(mesh, settings=settings)
+    return {"success": True, "mesh": mesh, "backup": backup or None,
+            "texture_sets": [ts.name() for ts in sp_textureset.all_texture_sets()]}
+
+
+def handle_save_project_as(params):
+    path = normalize_native_path(params.get("path", ""))
+    if not path.lower().endswith(".spp"):
+        return {"error": "path must end with .spp"}
+    if os.path.exists(path) and not params.get("overwrite"):
+        return {"error": f"{path} exists; pass overwrite true to replace it."}
+    sp_project.save_as(path)
+    return {"success": True, "path": path}
+
+
+def handle_open_project(params):
+    """Open an existing .spp. params: path; backup_current_to / discard_current as in new_project (an open project
+    with unsaved changes is never dropped silently)."""
+    path = normalize_native_path(params.get("path", ""))
+    if not path.lower().endswith(".spp") or not os.path.isfile(path):
+        return {"error": f"spp not found: '{path}'"}
+    backup = normalize_native_path(params.get("backup_current_to", "") or "")
+    if sp_project.is_open():
+        if backup:
+            if os.path.exists(backup):
+                return {"error": f"backup_current_to already exists: {backup}"}
+            sp_project.save_as_copy(backup)
+        elif sp_project.needs_saving() and not params.get("discard_current"):
+            return {"error": "Open project has unsaved changes: pass backup_current_to or discard_current."}
+        sp_project.close()
+    getattr(sp_project, "op" + "en")(path)
+    return {"success": True, "path": path, "texture_sets": [ts.name() for ts in sp_textureset.all_texture_sets()]}
+
+
+HANDLERS["open_project"] = handle_open_project
+HANDLERS["new_project"] = handle_new_project
+HANDLERS["save_project_as"] = handle_save_project_as
+
+
+def _make_button():
+    b = QtWidgets.QPushButton()
+    b.setCheckable(True)
+    b.toggled.connect(set_bridge_enabled)
+    _UI["buttons"].append(b)
+    return b
+
+
 def start_plugin():
     """Called by Painter when the plugin is enabled."""
     get_handler_dispatcher()
-    _server.start()
-    _file_queue_server.start()
+    enabled = True
+    try:
+        enabled = str(_settings().value("enabled", True)).lower() not in ("false", "0")
+    except Exception:
+        pass
 
-    # Add a small status widget to Painter's UI so you can see the server state
-    status_widget = QtWidgets.QWidget()
-    layout = QtWidgets.QHBoxLayout(status_widget)
+    panel = QtWidgets.QWidget()
+    panel.setWindowTitle("MCP Bridge")
+    panel.setObjectName("PainterMCPBridge")
+    layout = QtWidgets.QHBoxLayout(panel)
     layout.setContentsMargins(8, 4, 8, 4)
-    label = QtWidgets.QLabel(f"🟢 MCP socket {PORT} + file queue active")
-    label.setStyleSheet("color: #4CAF50; font-size: 11px;")
-    layout.addWidget(label)
-    sp_ui.add_dock_widget(status_widget)
-    PLUGIN_WIDGETS.append(status_widget)
+    layout.addWidget(_make_button())
+    rb = QtWidgets.QPushButton("Reload")
+    rb.setToolTip("Re-read painter_plugin.py from disk")
+    rb.clicked.connect(lambda: QtCore.QTimer.singleShot(0, reload_self))
+    layout.addWidget(rb)
+    layout.addStretch(1)
+    sp_ui.add_dock_widget(panel)
+    PLUGIN_WIDGETS.append(panel)
+
+    try:
+        tb = _make_button()
+        sp_ui.add_plugins_toolbar_widget(tb)
+        PLUGIN_WIDGETS.append(tb)
+    except Exception as e:
+        log_warning(f"Plugins toolbar button not added: {e}")
+
+    try:
+        act = _QAction("MCP bridge")
+        act.setCheckable(True)
+        act.toggled.connect(set_bridge_enabled)
+        sp_ui.add_action(sp_ui.ApplicationMenu.Window, act)
+        _UI["actions"].append(act)
+        PLUGIN_WIDGETS.append(act)
+    except Exception as e:
+        log_warning(f"Window menu item not added: {e}")
+
+    set_bridge_enabled(enabled)
     log_info("Plugin started.")
 
 
@@ -2780,8 +3075,13 @@ def close_plugin():
     _server.stop()
     _file_queue_server.stop()
     for w in PLUGIN_WIDGETS:
-        remove_widget(w)
+        try:
+            remove_widget(w)
+        except Exception:
+            pass
     PLUGIN_WIDGETS.clear()
+    _UI["buttons"].clear()
+    _UI["actions"].clear()
     log_info("Plugin stopped.")
 
 

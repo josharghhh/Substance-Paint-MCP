@@ -308,6 +308,54 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="bake_info",
+            description=(
+                "Native Python baking API: list the bake properties (common + per baker, current values, "
+                "enum options) for a texture set. Use before bake_start to learn property names."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "texture_set": {"type": "string", "description": "Texture set (default: first)."},
+                    "bakers": {"type": "array", "items": {"type": "string"},
+                               "description": "Bakers to describe, e.g. ['ID', 'AO'] (default: enabled ones)."},
+                },
+            },
+        ),
+        types.Tool(
+            name="bake_start",
+            description=(
+                "Native Python bake (async, returns immediately; poll bake_status). Sets output size, enabled "
+                "bakers and any property, e.g. set={'common': {'LowAsHigh': true}, 'ID': {'ColorSource': 'Vertex Color'}}. "
+                "Enum values may be given by name."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "texture_sets": {"type": "array", "items": {"type": "string"}, "description": "Default: all."},
+                    "size": {"type": "integer", "description": "Output size in px (power of 2), e.g. 4096."},
+                    "bakers": {"type": "array", "items": {"type": "string"},
+                               "description": "Enabled bakers, e.g. ['Normal','WorldSpaceNormal','ID','AO','Curvature','Position','Thickness']."},
+                    "set": {"type": "object", "description": "{group: {property: value}}; group 'common' or a baker name."},
+                },
+            },
+        ),
+        types.Tool(
+            name="reload_plugin",
+            description="Re-import painter_plugin.py from disk inside Painter (after updating the plugin file).",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="reload_mesh_status",
+            description="Status of the last reload_mesh (reload is async): RUNNING, SUCCESS or ERROR.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="bake_status",
+            description="Status of the last bake_start: running flag, elapsed seconds, end status.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
             name="get_export_presets",
             description="List all available export presets in Substance Painter.",
             inputSchema={
@@ -880,6 +928,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
         "list_texture_sets":          "list_texture_sets",
         "export_textures":            "export_textures",
         "bake_maps":                  "bake_maps",
+        "bake_info":                  "bake_info",
+        "bake_start":                 "bake_start",
+        "bake_status":                "bake_status",
+        "reload_mesh_status":         "reload_mesh_status",
+        "reload_plugin":              "reload_plugin",
         "get_export_presets":         "get_export_presets",
         "save_project":               "save_project",
         "reload_mesh":                "reload_mesh",
